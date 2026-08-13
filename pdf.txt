@@ -1,0 +1,666 @@
+================================================================================
+FITLAB — AI POSTURE COACH (HACKATHON FINAL)
+Complete Project Documentation & Technical Deep-Dive
+================================================================================
+
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1.  Project Overview
+2.  Tech Stack
+3.  Project Structure (File Tree)
+4.  App Flow / Screens
+5.  Exercise Configuration System
+6.  The Pose Detection Pipeline (Camera -> Landmarks -> Analysis)
+7.  The "Dots" (Landmarks) — How They Are Calculated
+8.  Angle Calculation — The Math Behind Every Joint
+9.  Posture Checking (postureChecker.js)
+10. Rep Counting (repCounter.js) — The State Machine
+11. Hold Timer (holdTimer.js)
+12. Body Motion Classifier (bodyMotionClassifier.js)
+13. Voice Assistant (speechSynthesis + Audio fallback)
+14. Left / Right Side Auto-Selection
+15. Performance (FPS) & Camera Handling
+16. UI / Design System
+17. Deployment Setup
+
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+FITLAB is a mobile-first web app that turns your phone camera into a real-time
+AI personal trainer. It uses MediaPipe's Pose Landmarker (via
+@mediapipe/tasks-vision) to detect 33 body keypoints ("dots") from the live
+camera feed, and then runs custom JS math to:
+
+  - Measure joint angles (knee, elbow, hip, shoulder, back...)
+  - Judge whether your posture/form is CORRECT or INCORRECT
+  - Count exercise reps and classify each rep as GOOD or BAD
+  - Time how long you HOLD a static pose (Plank, Warrior 2)
+  - Classify free-form full-body MOTION (hands up, sitting, leg lifts...)
+  - Speak the results out loud via a voice assistant (speechSynthesis + audio
+    fallback) so you can keep your eyes on the screen.
+
+It is built for the hackathon as a working demo: auth is a mock (login/signup
+just navigate between screens), stats on the dashboard are demo data, and the
+real magic lives in the workout screen (PoseDetector) + the utils folder.
+
+
+================================================================================
+2. TECH STACK
+================================================================================
+
+Category            | Technology
+--------------------|----------------------------------------------------------
+Framework           | Next.js 15.5.9 (App Router, "use client" components)
+UI Library          | React 19.2.1
+Language            | JavaScript (JSX) + TypeScript for config files
+Styling             | Tailwind CSS 3.4 + tailwindcss-animate
+Fonts               | Inter (body) + Space Grotesk (headlines) via Google Fonts
+Icons               | lucide-react 0.475
+Pose AI             | @mediapipe/tasks-vision 1.0.1 (PoseLandmarker)
+UI Components       | shadcn/ui-style components (Radix UI primitives)
+Backend/Auth        | firebase 11.9.1 (installed, demo uses mock navigation)
+Forms               | react-hook-form + zod (@hookform/resolvers)
+Date utils          | date-fns
+Charts              | recharts
+Dev server          | next dev --turbopack -p 9002
+Hosting config      | Firebase App Hosting (apphosting.yaml, maxInstances: 1)
+
+Key runtime dependencies loaded from CDN inside PoseDetector.jsx:
+  - MediaPipe WASM files:  https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm
+  - Pose model:           https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task
+  - Voice TTS fallback:   https://translate.google.com/translate_tts (audio element)
+
+
+================================================================================
+3. PROJECT STRUCTURE (FILE TREE)
+================================================================================
+
+next.config.ts / tailwind.config.ts / postcss.config.mjs / tsconfig.json
+apphosting.yaml                    <- Firebase App Hosting config
+components.json                    <- shadcn/ui config
+package.json                       <- dependencies & scripts
+docs/blueprint.md                  <- original blueprint
+src/
+  app/
+    layout.tsx                     <- root layout (fonts, metadata, viewport)
+    page.tsx                       <- "/"  -> renders LoginScreen
+    globals.css                    <- global styles (CSS vars, patterns, fonts)
+    login/page.tsx                 <- "/login"
+    signup/page.tsx                <- "/signup"
+    home/page.tsx                  <- "/home" -> renders HomeScreen
+    workout/page.tsx               <- "/workout?exercise=<id>" -> PoseDetector
+  components/
+    PoseDetector.jsx               <- THE core: camera + AI + voice + all logic
+    HomeScreen.jsx                 <- dashboard with exercise library + tab bar
+    LoginScreen.jsx                <- mock login form
+    SignUpScreen.jsx               <- mock signup form
+    LogoMark.jsx                   <- FITLAB logo
+    ui/                            <- shadcn/ui components (button, card, etc.)
+  config/
+    exerciseRules.js               <- every exercise's checks, angles, thresholds
+  utils/
+    landmarks.js                   <- name -> index map of the 33 MediaPipe dots
+    angleCalculator.js             <- joint angle math (atan2)
+    postureChecker.js              <- correctness scoring per exercise check
+    repCounter.js                  <- rep state machine + good/bad classification
+    holdTimer.js                   <- hold timing engine
+    bodyMotionClassifier.js        <- free-motion classification (hands/sit/legs)
+  hooks/
+    use-mobile.tsx, use-toast.ts   <- shadcn hooks
+  lib/
+    utils.ts                       <- cn() class merge helper
+    placeholder-images.ts/.json    <- placeholder data
+
+
+================================================================================
+4. APP FLOW / SCREENS
+================================================================================
+
+  "/"       LoginScreen  -- email+password form (mock) -> router.push("/home")
+  "/signup" SignUpScreen -- name/email/password (mock) -> router.push("/login")
+  "/home"   HomeScreen   -- dashboard:
+                            * FITLAB header + Log out
+                            * "Ready to crush today's workout?" gradient banner
+                              with Start Workout button
+                            * Stats grid (Workouts / Calories / Streak / Minutes)
+                            * Workout library card showing the selected
+                              exercise's name, type badge (Hold/Reps/Tracking),
+                              description, and its list of posture checks
+                            * Bottom tab bar with 3 exercises:
+                              Squat, Curl (Bicep Curl), Body Motion
+                            Start button -> router.push("/workout?exercise=<id>")
+  "/workout?exercise=squat|bicepCurl|bodyMotion|plank|virabhadrasana"
+                 PoseDetector -- full-screen camera + analysis + voice.
+
+Workout deep-link safety: PoseDetector guards against unknown ids and falls
+back to "plank". Next 15 searchParams are a Promise; duplicate query keys
+arrive as arrays and are narrowed to a single string.
+
+
+================================================================================
+5. EXERCISE CONFIGURATION SYSTEM (src/config/exerciseRules.js)
+================================================================================
+
+Every exercise is described declaratively in ONE object. This is what makes the
+whole analyzer generic — the same angle/posture/rep/hold engines run for any
+exercise just by reading this config.
+
+Exercise shape:
+  {
+    name: "Squat",
+    description: "...",
+    type: "rep" | "hold" | "tracking",
+    repDetection: {                 // only for type: "rep"
+      trackCheckId: "kneeAngle",    // which check's angle drives the counter
+      downThreshold: 100,           // angle that counts as "down" (absolute)
+      upThreshold: 160,             // angle that counts as "up" (absolute)
+      minMotionRange: 30,           // min degrees of movement required
+      scoringDownAngle: 100,        // min depth needed for a GOOD rep
+      scoringUpAngle: 160           // min extension needed for a GOOD rep
+    },
+    checks: [                       // one entry per posture rule
+      {
+        id: "kneeAngle",
+        label: "Knee Bend",
+        points: ["LEFT_HIP", "LEFT_KNEE", "LEFT_ANKLE"],  // 3 landmark names
+        idealAngle: 90,             // target degrees
+        tolerance: 45,              // +- degrees that still count as correct
+        isPrimary: true,            // (legacy flag, kept for compatibility)
+        feedbackTooLow: "...",      // spoken/shown when angle < ideal
+        feedbackTooHigh: "..."      // spoken/shown when angle > ideal
+      }, ...
+    ]
+  }
+
+The 5 configured exercises:
+
+  PLANK           type: hold
+    backAlignment : shoulder-hip-ankle,   ideal 180, tol 30  (primary)
+    elbowSupport  : shoulder-elbow-wrist, ideal 90,  tol 35
+
+  SQUAT           type: rep   (track: kneeAngle; down 100 / up 160 / range 30;
+                                scoring: down 100, up 160)
+    kneeAngle       : hip-knee-ankle,        ideal 90, tol 45 (primary)
+    hipAngle        : shoulder-hip-knee,     ideal 90, tol 40
+    backStraightness: shoulder-hip-ankle,    ideal 170, tol 35
+
+  BICEP CURL      type: rep   (track: elbowAngle; down 50 / up 150 / range 30;
+                                scoring: down 80, up 150)
+    elbowAngle       : shoulder-elbow-wrist,        ideal 90, tol 70 (primary)
+    upperArmStability: right-shoulder-left-shoulder-left-elbow, ideal 92, tol 40
+
+  BODY MOTION     type: tracking   (uses classifyBodyMotion, section 12)
+    uprightPosture   : shoulder-hip-ankle, ideal 175, tol 30 (primary)
+    shoulderBalance  : shoulder-hip(hip),  ideal 90,  tol 30
+    kneeMobility     : hip-knee-ankle,      ideal 90,  tol 70
+
+  VIRABHADRASANA (WARRIOR 2)  type: hold
+    frontKneeAngle : hip-knee-ankle,        ideal 90,  tol 35 (primary)
+    backLegStraight: hip-knee-ankle,        ideal 175, tol 25
+    armExtension   : elbow-shoulder-elbow,  ideal 180, tol 30
+    torsoUpright   : shoulder-hip-knee,     ideal 90,  tol 35
+
+
+================================================================================
+6. THE POSE DETECTION PIPELINE (Camera -> Landmarks -> Analysis)
+================================================================================
+
+PoseDetector.jsx orchestrates everything. Pipeline per frame:
+
+  1. getUserMedia video stream (480x640 portrait, facingMode user/environment,
+     audio OFF). The <video> element is invisible (opacity 0, pointer-events
+     none) — it only feeds the model.
+
+  2. PoseLandmarker is loaded ONCE as a module-level singleton:
+       FilesetResolver.forVisionTasks(cdn wasm)
+       PoseLandmarker.createFromOptions({
+         baseOptions: { modelAssetPath: pose_landmarker_full.task,
+                        delegate: "GPU" },   // falls back to "CPU" on error
+         runningMode: "VIDEO",   // <-- MUST be VIDEO, not LIVE_STREAM
+         numPoses: 1
+       })
+
+  3. A requestAnimationFrame loop calls, for every frame:
+       poseRef.current.detectForVideo(videoElement, performance.now())
+     and passes the detected landmarks array (33 dots) to
+     resultsHandlerRef.current(landmarks).
+
+  4. The results handler does, per frame:
+       a. Draw video frame onto <canvas> (480x640, object-cover, mirrored
+          with -scale-x-100 when using the front camera).
+       b. drawPose(): draw skeleton lines (green) between the POSE_CONNECTIONS
+          pairs + a red dot at every landmark.
+       c. IF tracking exercise -> classifyBodyMotion() -> update UI + VOICE.
+       d. checkPosture() -> per-check correct/incorrect + overallStatus.
+       e. IF rep exercise   -> pick active side (left/right), compute the
+          tracked joint angle, repCounter.updateFrame(angle, status).
+         ELSE IF hold ex.   -> holdTimer.updateFrame(overallStatus, true).
+       f. Update FPS counter once per second.
+
+  5. Errors are mapped to human-friendly messages (camera permission denied,
+     no camera, camera in use, security blocked, embedded preview iframe...)
+     with a "Retry Camera" button.
+
+Key robustness details:
+  - Model loads once and is reused (module-level landmarkerPromise).
+  - GPU delegate failure automatically retries with CPU delegate.
+  - If embedded in an iframe (window.self !== window.top), a warning banner
+    tells the user to open the app full-screen because camera + voice can be
+    blocked inside iframes.
+  - All analysis uses plain refs + state; no heavy re-renders per frame.
+
+
+================================================================================
+7. THE "DOTS" (LANDMARKS) — HOW THEY ARE CALCULATED
+================================================================================
+
+This is the heart of the app. The red dots you see on screen are the 33 body
+keypoints output by MediaPipe's Pose Landmarker (the "pose_landmarker_full"
+model, a BlazePose-based neural network running on GPU/CPU via WASM).
+
+WHAT THE MODEL OUTPUTS
+--------------------------------------------------------------------------------
+For every detected person, the model returns an array of 33 landmarks. Each
+landmark is an object with 4 fields:
+
+  {
+    x: 0..1    // NORMALIZED horizontal position. 0 = left edge of the video,
+               // 1 = right edge. Independent of camera resolution.
+    y: 0..1    // NORMALIZED vertical position. 0 = TOP of the video,
+               // 1 = bottom. NOTE: y grows DOWNWARD (screen coordinates).
+    z: number  // DEPTH relative to the hip "center", roughly scaled like x.
+               // Negative = closer to camera than the midpoint. Used for 3D
+               // info; this app mostly uses x/y.
+    visibility: 0..1  // confidence that this dot is actually visible.
+  }
+
+Because x/y are normalized, the math works at ANY camera resolution — the app
+doesn't care whether the stream is 480x640 or 1920x1080.
+
+THE 33 LANDMARKS (index : body part) — as mapped in utils/landmarks.js
+--------------------------------------------------------------------------------
+   0  NOSE              16  RIGHT_WRIST
+   1  LEFT_EYE_INNER    17  LEFT_PINKY
+   2  LEFT_EYE          18  RIGHT_PINKY
+   3  LEFT_EYE_OUTER    19  LEFT_INDEX
+   4  RIGHT_EYE_INNER   20  RIGHT_INDEX
+   5  RIGHT_EYE         21  LEFT_THUMB
+   6  RIGHT_EYE_OUTER   22  RIGHT_THUMB
+   7  LEFT_EAR          23  LEFT_HIP
+   8  RIGHT_EAR         24  RIGHT_HIP
+   9  LEFT_MOUTH        25  LEFT_KNEE
+  10  RIGHT_MOUTH       26  RIGHT_KNEE
+  11  LEFT_SHOULDER     27  LEFT_ANKLE
+  12  RIGHT_SHOULDER    28  RIGHT_ANKLE
+  13  LEFT_ELBOW        29  LEFT_HEEL
+  14  RIGHT_ELBOW       30  RIGHT_HEEL
+  15  LEFT_WRIST        31  LEFT_FOOT_INDEX
+  16 (above)            32  RIGHT_FOOT_INDEX
+
+landmarks.js exposes a constant map so the rest of the code never uses magic
+numbers: LANDMARKS.LEFT_SHOULDER === 11, etc.
+
+HOW THE DOTS GET ON SCREEN
+--------------------------------------------------------------------------------
+The canvas is 480x640. To place a dot at pixel coordinates:
+
+    px = landmark.x * 480
+    py = landmark.y * 640
+
+drawPose() in PoseDetector.jsx then:
+  - Draws green lines connecting the 35 standard skeleton pairs listed in
+    POSE_CONNECTIONS (e.g. [11,13] left shoulder->elbow, [11,23] shoulder->
+    hip, [23,25] hip->knee, [25,27] knee->ankle...).
+  - Draws a red filled circle (radius 3px) at every landmark position.
+
+The front-camera view is mirrored with CSS (-scale-x-100) so it feels like a
+mirror; the math itself is unaffected because the model already understands
+the (mirrored) image — left/right stay consistent with what the user sees.
+
+WHY WE ONLY USE A SUBSET OF DOTS
+--------------------------------------------------------------------------------
+Exercise analysis only needs the major joints, so angleCalculator/posture
+logic reads a small set: shoulders, elbows, wrists, hips, knees, ankles.
+The remaining dots (eyes, ears, mouth, fingers, feet) are rendered visually
+but not used in the fitness math.
+
+
+================================================================================
+8. ANGLE CALCULATION — THE MATH BEHIND EVERY JOINT (utils/angleCalculator.js)
+================================================================================
+
+>>> IMPORTANT: TENSORS vs PLAIN JS MATH <<<
+The angle calculation in THIS codebase does NOT use tensors, tensorflow.js,
+or any neural network. Tensors are only used INSIDE MediaPipe's PoseLandmarker
+model (BlazePose) to detect the 33 dots — that runs on WASM/WebGL under the
+hood and is completely hidden from our code.
+
+Our code receives the 33 dots as plain JS objects ({ x, y, z, visibility })
+and computes every angle with simple 2D vector arithmetic using Math.atan2 on
+regular numbers. No @tensorflow/tfjs dependency exists in package.json.
+This keeps the per-frame cost tiny (a few microseconds) so it can run at
+camera framerate even on low-end phones.
+
+To measure a joint angle we always pick THREE dots:
+    pointA (one end) -- pointB (the JOINT/vertex) -- pointC (other end)
+
+e.g. for the knee: pointA = LEFT_HIP, pointB = LEFT_KNEE, pointC = LEFT_ANKLE.
+
+STEP 1 — Build two vectors pointing INTO the joint:
+    v1 = pointA - pointB = (A.x - B.x, A.y - B.y)
+    v2 = pointC - pointB = (C.x - B.x, C.y - B.y)
+
+STEP 2 — Compute the angle between the two vectors using atan2 of the
+cross product and the dot product (the standard robust 2D angle formula):
+
+    angleRadians = | atan2( v1.x*v2.y - v1.y*v2.x ,   <- cross product (z)
+                            v1.x*v2.x + v1.y*v2.y ) |  <- dot product
+
+    angleDegrees = angleRadians * 180 / PI
+
+This formula returns the smaller angle (0..180) between the two segments.
+atan2 keeps it numerically stable for all angles (unlike acos which suffers
+precision loss near 0/180 degrees).
+
+Helpers:
+  angleFromPoints(landmarks, ["LEFT_HIP","LEFT_KNEE","LEFT_ANKLE"])
+      -> looks up the three dots by name, returns degrees (or null if any
+         dot is missing — e.g. a joint not visible).
+
+  mirrorPoints(["LEFT_HIP", ...])
+      -> swaps LEFT_/RIGHT_ prefixes so the SAME check definition can be
+         evaluated on the body's other side (used for left/right tracking).
+
+SUMMARY OF WHERE ML (TENSORS) IS USED vs WHERE IT IS NOT:
+  ML / tensors (inside MediaPipe): detecting the 33 landmarks from the video
+  frame — model inference only, no tensorflow.js API in our code.
+  Plain JS math (ours): every angle, posture check, rep phase, hold timing,
+  and body-motion classification — all on x/y numbers.
+
+EXAMPLE (bicep curl elbow):
+  points = shoulder(11), elbow(13), wrist(15)
+  arm fully extended  -> ~180 deg
+  arm fully curled    -> ~30-40 deg
+
+
+================================================================================
+9. POSTURE CHECKING (utils/postureChecker.js)
+================================================================================
+
+checkPosture(landmarks, exercise, { mirror }) evaluates EVERY "check" defined
+for the exercise on the CURRENT frame:
+
+  actualAngle  = angle from the 3 named dots
+  deviation    = |actualAngle - check.idealAngle|
+  isCorrect    = deviation <= check.tolerance
+  significantlyOff = deviation > tolerance + SIGNIFICANT_EXTRA_DEGREES (15)
+
+Per-check result: { id, label, actualAngle (rounded), status: correct|
+incorrect, significantlyOff, feedback: feedbackTooLow/High or null }
+
+If any of the 3 dots is missing, that check is reported as incorrect with the
+feedback "Joint not visible - adjust camera position".
+
+OVERALL STATUS (whole body this frame):
+    incorrect if  (any check is significantlyOff)
+               OR (>= half of the checks are incorrect)
+    otherwise correct
+
+  (A check that is only "slightly off" — within tolerance+15deg — does not by
+   itself fail the whole body, which makes the coach forgiving but strict
+   enough to catch real form breaks.)
+
+This overallStatus is what the rep counter and hold timer consume.
+
+
+================================================================================
+10. REP COUNTING (utils/repCounter.js) — THE STATE MACHINE
+================================================================================
+
+The rep counter is a classic two-phase state machine with debouncing:
+
+  phase "up"   -> arm/knee extended (high angle)
+  phase "down" -> arm/knee bent    (low angle)
+  One full rep = down -> back to up.
+
+CONFIG USED (from repDetection):
+  downThreshold (e.g. 100)   absolute low angle meaning "down"
+  upThreshold   (e.g. 160)   absolute high angle meaning "up"
+  minMotionRange (30)        minimum degrees of travel to count movement
+  scoringDownAngle / scoringUpAngle  depth+extension required for GOOD
+
+DEBOUNCE (TRANSITION_FRAMES = 3):
+  A phase change only counts after 3 CONSECUTIVE frames agree, so jitter from
+  the camera / model noise never registers a false rep.
+
+WHILE IN PHASE "up" (tracking max extension):
+  maxAngle = max(maxAngle, current)
+  upPeak   = max(upPeak, current)
+  Going down is detected when either:
+    droppedRelative: maxAngle - currentAngle >= minMotionRange   (relative)
+    crossedAbsDown:  maxAngle >= upThreshold && current <= downThreshold (absolute)
+  If that holds for 3 frames -> switch to phase "down"; record upPeak = maxAngle.
+
+WHILE IN PHASE "down" (tracking the lowering + form):
+  minAngle = min(minAngle, current)
+  Each frame the current posture is bucketed for the cycle score:
+      actualAngle == null  -> cycleMissingFrames++
+      overallStatus correct -> cycleGoodFrames++
+      else                  -> cycleBadFrames++
+  Going back up when either:
+    roseRelative: currentAngle - minAngle >= minMotionRange
+    crossedAbsUp: minAngle <= downThreshold && current >= upThreshold
+  After 3 frames -> rep COMPLETE -> classifyRep(state) -> back to "up".
+
+CLASSIFYING THE REP (good vs bad):
+  1. missing > half the cycle frames          -> BAD (person left frame)
+  2. minAngle  > scoringDownAngle (didn't go deep enough)   -> BAD
+     upPeak    < scoringUpAngle   (didn't fully extend)     -> BAD
+  3. otherwise: GOOD if cycleGoodFrames > cycleBadFrames, else BAD.
+
+On completion:
+  - goodReps++ / badReps++ updated in state (pulseCount animates the numbers)
+  - onRepComplete({ classification }) fires -> PoseDetector speaks
+    "Good" or "Bad" out loud.
+  - Console logs a debug line with form %, min/peak angles.
+
+DEFAULT if config missing: minMotionRange = 30, scoringDown = 0,
+scoringUp = 180 (lenient fallback).
+
+
+================================================================================
+11. HOLD TIMER (utils/holdTimer.js)
+================================================================================
+
+Used for static poses (Plank, Warrior 2). Each frame:
+  updateFrame(overallStatus, poseDetected)
+
+  - If pose detected, remember lastPoseTime. If the person has been out of
+    frame for > 2 seconds (POSE_LOST_RESET_MS), the accumulated hold resets.
+  - If overallStatus === "correct": start a hold timestamp (if not running).
+    Else (incorrect/out of frame): freeze the elapsed time into
+    "accumulated" and stop the clock.
+  - currentMs = accumulated + (now - holdStart if currently holding)
+  - currentHold = floor(currentMs / 1000) — updates the UI only when the
+    displayed second changes (avoids re-rendering every frame).
+  - bestHold tracks the longest continuous correct hold achieved.
+
+Note: "correct" here means the checker said the whole body is in form, so the
+timer only runs while you're actually holding the pose correctly.
+
+
+================================================================================
+12. BODY MOTION CLASSIFIER (utils/bodyMotionClassifier.js)
+================================================================================
+
+For the "Body Motion" (type: "tracking") exercise, instead of angle checks we
+classify WHAT the body is doing using normalized RATIOS of dot positions. The
+key trick: everything is scaled relative to torsoY = avg(|shoulder.y -
+hip.y|) of both sides, so the same thresholds work for tall and short users
+and at any distance from the camera.
+
+Constants & thresholds:
+  UP_MARGIN_RATIO      = 0.12   hand must be this much above shoulder
+  SIT_HIP_TO_KNEE_RATIO= 0.6    hips dropped this close to knee height = sitting
+  LEG_FOOT_UP_RATIO    = 0.6    foot raised this close to knee = leg up
+  LEG_KNEE_RAISE_RATIO = 0.35   knee tucked this far up toward hip = leg up
+
+Logic order (first match wins):
+
+  1) HANDS UP: for each side, rightUp = (shoulder.y - wrist.y) > upMargin
+     (remember y grows DOWN, so wrist ABOVE shoulder gives a positive value).
+       both -> "hands-up" ("Hands are up")
+       one  -> "right-hand-up" / "left-hand-up"
+
+  2) SITTING: bothHipsLow = |hip.y - knee.y| < torsoY * 0.6 on BOTH sides
+     (hips dropped near knee height). A single high knee raise is NOT sitting
+     (the both-sides rule prevents that), and a chair sit IS caught even
+     though the hip-knee-ankle angle is ~180deg.
+       -> "sitting" ("Person is sitting")
+
+  3) LEGS UP: per side, either the foot is raised to near knee height
+     (ankle.y - knee.y < torsoY * 0.6) OR the knee is tucked toward the hip
+     (knee.y - hip.y < torsoY * 0.35).
+       both -> "legs-up" ; one -> "right-leg-up" / "left-leg-up"
+
+  4) DEFAULT -> "standing" ("Hands are down")
+
+Labels are exported as MOTION_LABELS and shown big on the Body Motion screen,
+and announced by the voice assistant.
+
+VOICE ANNOUNCEMENT CONTROL (added to fix voice issues):
+  - Announcements are throttled to at most one per 1200ms
+    (MOTION_SPEAK_GAP_MS) to avoid a "speak storm" from the classifier
+    flipping several times per second.
+  - A trailing settle timer (800ms, MOTION_SETTLE_MS) guarantees the final
+    pose the user settles into is still announced even if a change was
+    throttled.
+  - Refs reset cleanly when the person leaves the frame.
+
+
+================================================================================
+13. VOICE ASSISTANT (speechSynthesis + Audio fallback)
+================================================================================
+
+The coach talks! Announcements:
+  - Body Motion screen: "Hands are up", "Person is sitting", etc.
+  - Rep exercises: "Good" / "Bad" on each rep completion.
+  - Buttons: "Voice assistant on", "Voice is working".
+
+STRATEGY (two engines):
+  1. PRIMARY — Web Speech API (window.speechSynthesis).
+     Used when getVoices() returns at least one voice.
+  2. FALLBACK — <audio> element playing Google Translate TTS
+     (translate.google.com/translate_tts?client=tw-ob&q=...&tl=en)
+     Used when there is no usable speechSynthesis (e.g. blocked in iframe
+     or no voices).
+
+BROWSER GOTCHAS HANDLED:
+  - Chrome blocks programmatic audio until a REAL user gesture on the page.
+    On the first pointerdown/touchstart/keydown we "unlock": create + resume
+    an AudioContext and play an inaudible WAV, then prime speechSynthesis
+    (resume/cancel/getVoices). The navigation tap from Home doesn't count,
+    so a hint is shown on Body Motion: "Tap anywhere on the screen once to
+    enable the voice coach" until the first tap, which immediately announces
+    the current motion as confirmation.
+  - Chrome fetches voices ASYNCHRONOUSLY: a "voiceschanged" listener + a 400ms
+    engine warm-up utterance (" ") wake the TTS engine so the first real
+    announcement isn't dropped.
+  - Keeping the SpeechSynthesisUtterance in a ref prevents Chrome from
+    garbage-collecting it mid-speech (which would go silent).
+  - If an utterance errors (not "canceled"), fall back to the audio engine.
+  - Interruption: if already speaking, cancel + re-say after 120ms so rapid
+    consecutive messages don't queue forever.
+  - isSpeaking state drives a "Speaking..." indicator on the Test voice button.
+
+SETTINGS UI:
+  - Voice On/Off toggle (Volume2 / VolumeX icons).
+  - "Test voice" button -> speaks "Voice is working" (disabled when off).
+  - Reset button (hidden on tracking screens).
+  - On unmount all speech/audio/timers are cleaned up.
+
+
+================================================================================
+14. LEFT / RIGHT SIDE AUTO-SELECTION (selectRepSide in PoseDetector)
+================================================================================
+
+Rep exercises (squat, bicep curl) are defined with LEFT-side points only, but
+users may exercise either side. PoseDetector therefore:
+
+  1. Computes the tracked angle for BOTH sides:
+       left  = angleFromPoints(landmarks, check.points)
+       right = angleFromPoints(landmarks, mirrorPoints(check.points))
+  2. Keeps a rolling 12-frame history of each side's angles.
+  3. Measures each side's motion RANGE (max - min over the window).
+  4. Picks the side with clearly more movement:
+       switch to "right" if  rightRange > leftRange * 1.5 + 12
+       switch to "left"  if  leftRange  > rightRange * 1.5 + 12
+     (persisted in a ref, so it doesn't flicker frame-to-frame)
+  5. Falls back to the other side if the chosen one briefly loses landmarks,
+     and evaluates posture with mirror:true for the active side.
+
+This way a left-handed curl and a right-handed curl both count correctly.
+
+
+================================================================================
+15. PERFORMANCE (FPS) & CAMERA HANDLING
+================================================================================
+
+  - FPS: a frame counter increments every processed frame; once per second the
+    elapsed-time diff is converted to FPS and shown in the "Live" chip area.
+  - Stream: getUserMedia({ video: { facingMode, width: 480, height: 640 },
+    audio: false }). Portrait 3:4 keeps the user in frame.
+  - Flip camera button toggles facingMode user <-> environment; the stream is
+    torn down and recreated; on failure the mode is rolled back and a friendly
+    error is shown.
+  - Cleanup on unmount: rAF loop cancelled, camera tracks stopped, landmarker
+    closed, module singleton reset.
+  - Analysis cost is minimized by using refs for per-frame state and only
+    calling setState when displayed values actually change.
+
+
+================================================================================
+16. UI / DESIGN SYSTEM
+================================================================================
+
+  - Mobile-first, max width 430px, safe-area-inset aware.
+  - Palette: teal primary (#14B8A6 family), soft mint backgrounds (#F6FAF9,
+    #EAF9F7, #D9EFEC), deep indigo text (#35324A, #2E2A47, #8A86A0).
+  - Fonts: Space Grotesk for headlines (font-headline), Inter for body
+    (font-body).
+  - Custom CSS: dotted-pattern backgrounds, drifting blurred blobs
+    (animate-drift-*), floating orb (animate-float), rep-pop number pulse,
+    animate-fade-up, pulse-ring camera frame.
+  - Login/signup use layered SVG wave shapes at the bottom.
+  - Workout screen: full-screen camera canvas with gradient scrims, floating
+    glass chips (Live, FPS, Camera status), centered pose hint, exercise name
+    at top, and a frosted-glass bottom sheet holding stats/controls.
+  - All interactive elements have hover/active scale micro-interactions and
+    focus rings.
+
+
+================================================================================
+17. DEPLOYMENT SETUP
+================================================================================
+
+  - Local dev:   npm run dev        (next dev --turbopack -p 9002)
+  - Build:       npm run build      (NODE_ENV=production next build)
+  - Start:       npm start
+  - Lint:        npm run lint       (next lint — deprecated in Next 16)
+  - Typecheck:   npm run typecheck  (tsc --noEmit)
+  - Hosting:     Firebase App Hosting configured via apphosting.yaml
+                 (runConfig.maxInstances: 1).
+  - No backend required for the demo: the pose model + WASM + voice fallback
+    are all loaded from public CDNs at runtime, so a static Next.js export
+    would also work.
+
+NOTE ON CREDENTIALS / SECURITY:
+  - Keep API tokens out of the repo. The GitHub push token used during
+    development should be revoked/rotated after use (GitHub -> Settings ->
+    Developer settings -> Personal access tokens).
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================

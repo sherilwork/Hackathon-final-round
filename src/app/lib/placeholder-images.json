@@ -1,0 +1,29 @@
+
+{
+  "placeholderImages": [
+    {
+      "id": "hero-character",
+      "description": "Sheril Character Illustration",
+      "imageUrl": "/version-1.png",
+      "imageHint": "character illustration"
+    },
+    {
+      "id": "logo-mark",
+      "description": "Minimalist logo mark",
+      "imageUrl": "https://picsum.photos/seed/pixelport-logo/100/100",
+      "imageHint": "minimalist abstract logo"
+    },
+    {
+      "id": "project-cbs",
+      "description": "Cardiatec Biosciences project showcase",
+      "imageUrl": "https://picsum.photos/seed/cbs-work/800/600",
+      "imageHint": "mobile application showcase"
+    },
+    {
+      "id": "bike-character",
+      "description": "Character on a bike illustration",
+      "imageUrl": "https://picsum.photos/seed/cyclist/400/400",
+      "imageHint": "cyclist illustration"
+    }
+  ]
+}

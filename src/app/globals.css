@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 232 91% 50%;
+    --foreground: 0 0% 0%;
+    --card: 232 91% 45%;
+    --card-foreground: 0 0% 0%;
+    --popover: 232 91% 50%;
+    --popover-foreground: 0 0% 0%;
+    --primary: 0 0% 0%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 0% / 0.1;
+    --secondary-foreground: 0 0% 0%;
+    --muted: 0 0% 0% / 0.05;
+    --muted-foreground: 0 0% 0% / 0.6;
+    --accent: 30 100% 50%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 0%;
+    --input: 0 0% 0%;
+    --ring: 232 91% 50%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body overflow-x-hidden;
+  }
+}
+
+@keyframes rep-pop {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.25);
+  }
+  70% {
+    transform: scale(0.95);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.rep-pop {
+  animation: rep-pop 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Scattered dotted decorative pattern used on the login screen. */
+.dotted-pattern {
+  background-image: radial-gradient(circle, #8edfd6 1.5px, transparent 1.5px);
+  background-size: 13px 13px;
+}
+
+/* --- Modern workout screen animations --- */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.8s ease-out both;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(20, 184, 166, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(20, 184, 166, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(20, 184, 166, 0);
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-fade-in,
+  .animate-pulse-ring,
+  .animate-drift-slow,
+  .animate-drift-medium,
+  .animate-drift-fast {
+    animation: none;
+  }
+}
